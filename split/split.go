@@ -8,6 +8,8 @@ import (
 	"io"
 )
 
+// TODO: max chunk size
+
 type Chunk struct {
 	Offset   int
 	Length   int
