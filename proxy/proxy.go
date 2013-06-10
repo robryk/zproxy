@@ -86,17 +86,20 @@ func copyHeaders(dst http.Header, src http.Header) {
 	}
 }
 
-func directProxy(rw http.ResponseWriter, url string) {
-	resp, err := http.Get(url)
+func directProxy(rw http.ResponseWriter, req *http.Request) {
+	r := sanitizeRequest(req)
+	resp, err := http.DefaultClient.Do(r)
 	if err != nil {
-		rw.WriteHeader(http.StatusInternalServerError)
+		http.Error(rw, fmt.Sprintf("Proxy error: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
+	// FIXME: Are there any headers we should omit?
 	copyHeaders(rw.Header(), resp.Header)
 	rw.WriteHeader(resp.StatusCode)
 	io.Copy(rw, resp.Body)
+	// FIXME: Maybe deal with Trailer? We should send the Trailer if our request was http/1.1
 }
 
 func isDirect(req *http.Request) bool {
@@ -119,27 +122,24 @@ func isDirect(req *http.Request) bool {
 		// even if the server claims otherwise.
 		return true
 	}
+	// FIXME: StatusMethodNotAvailable?
 	// FIXME: Cache-Control
 	return false
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if req.Method != "GET" {
-		rw.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
-
+	// FIXME: Deal with recursion
 	url := req.URL.String()
 	log.Printf("Serving %s", url)
 
 	if isDirect(req) {
 		log.Printf("Serving directly")
-		directProxy(rw, url)
+		directProxy(rw, req)
 		return
 	}
 	chunked, err := p.Cr.GetChunked(url)
 	if err != nil {
-		directProxy(rw, url)
+		directProxy(rw, req)
 		return
 	}
 
