@@ -1,14 +1,14 @@
 package hasher
 
 import (
+	"bytes"
 	"camlistore.org/pkg/singleflight"
 	"encoding/json"
 	"fmt"
+	"github.com/robryk/zproxy/proxy"
 	"github.com/robryk/zproxy/split"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 )
 
 // TODO: find better names for stuff
@@ -16,15 +16,15 @@ import (
 // TODO: figure out how to pass enough of an http.Request
 
 type ChunkedRetriever interface {
-	GetChunked(url string) (*Chunked, error)
+	GetChunked(req *proxy.Request) (*Chunked, error)
 }
 
 type Chunked struct {
 	Chunks []split.Chunk
 }
 
-func hashUrl(url string) (*Chunked, error) {
-	resp, err := http.Get(url)
+func hashRequest(req *proxy.Request) (*Chunked, error) {
+	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req))
 	if err != nil {
 		return nil, err
 	}
@@ -55,30 +55,30 @@ type Proxy struct {
 	group singleflight.Group
 }
 
-func (p *Proxy) GetChunked(url string) (*Chunked, error) {
-	log.Printf("Getting chunked version of [%s]", url)
-	v, err := p.group.Do(url, func() (interface{}, error) {
-		return hashUrl(url)
-	})
-	return v.(*Chunked), err
+func (p *Proxy) GetChunked(req *proxy.Request) (*Chunked, error) {
+	log.Printf("Getting chunked version of [%s]", req.URL)
+	//	v, err := p.group.Do(url, func() (interface{}, error) {
+	return hashRequest(req)
+	//	})
+	//	return v.(*Chunked), err
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if req.Method != "GET" {
-		rw.WriteHeader(http.StatusMethodNotAllowed)
+	if req.Method != "POST" {
+		http.Error(rw, "Use HTTP POST", http.StatusMethodNotAllowed)
 		return
 	}
 
-	url := req.FormValue("url")
-	if url == "" {
-		rw.WriteHeader(http.StatusBadRequest)
+	var proxyRequest proxy.Request
+	dec := json.NewDecoder(req.Body)
+	if err := dec.Decode(&proxyRequest); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	chunked, err := p.GetChunked(url)
+	chunked, err := p.GetChunked(&proxyRequest)
 	if err != nil {
-		rw.WriteHeader(http.StatusNotFound)
-		io.WriteString(rw, err.Error())
+		http.Error(rw, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -94,8 +94,13 @@ type RemoteProxy struct {
 	Url string
 }
 
-func (r RemoteProxy) GetChunked(urlString string) (*Chunked, error) {
-	resp, err := http.Get(r.Url + "?url=" + url.QueryEscape(urlString))
+func (r RemoteProxy) GetChunked(req *proxy.Request) (*Chunked, error) {
+	serializedReq, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.Post(r.Url, "application/json", bytes.NewReader(serializedReq))
 	if err != nil {
 		return nil, err
 	}
