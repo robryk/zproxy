@@ -18,13 +18,36 @@ type Proxy struct {
 	Cache cache.Cache
 }
 
-func getSize(url string) (int64, error) {
-	resp, err := http.Head(url)
-	if err != nil {
-		return 0, err
+func sanitizeRequest(req *http.Request) *http.Request {
+	r := &http.Request{}
+	// FIXME: What if old proto?
+
+	r.Method = req.Method
+	r.URL = req.URL // FIXME: Should this be deeper?
+	// Proto* are ignored on outgoing requests
+	r.Header = make(http.Header)
+	for k, vv := range req.Header {
+		if k == "Connection" {
+			continue
+		}
+		for _, v := range vv {
+			r.Header.Add(k, v)
+		}
+		// FIXME: Remove other headers
 	}
-	resp.Body.Close()
-	return resp.ContentLength, nil
+	r.Body = req.Body // We might wish to warn about this
+	r.ContentLength = req.ContentLength
+	if r.ContentLength == -1 {
+		r.ContentLength = 0 // necessary?
+	}
+	// FIXME: Deal better with Transfer-Encoding
+	r.TransferEncoding = nil
+	r.Close = false
+	r.Host = req.Host // necessary?
+	// *Form is ignored on outgoing requests
+	// We set nil Trailer, because there is no way for us to set it early enough (or so I think)
+	// RemoteAddr, RequestURI and TLS make no sense on an outgoing request
+	return r
 }
 
 type byteRange struct {
@@ -76,6 +99,30 @@ func directProxy(rw http.ResponseWriter, url string) {
 	io.Copy(rw, resp.Body)
 }
 
+func isDirect(req *http.Request) bool {
+	if req.Method != "GET" {
+		return true
+	}
+
+	headReq := sanitizeRequest(req)
+	headReq.Method = "HEAD"
+	headReq.Body = nil
+	headReq.ContentLength = 0
+	headResp, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		log.Printf("Head request to %s failed: %v", req.URL, err)
+		return true
+	}
+	headResp.Body.Close()
+	if headResp.ContentLength < SizeCutoff || headResp.ContentLength == -1 {
+		// If the server can't return a Content-Length, chances are high the page changes often
+		// even if the server claims otherwise.
+		return true
+	}
+	// FIXME: Cache-Control
+	return false
+}
+
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != "GET" {
 		rw.WriteHeader(http.StatusMethodNotAllowed)
@@ -85,8 +132,8 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	url := req.URL.String()
 	log.Printf("Serving %s", url)
 
-	if size, err := getSize(url); size < SizeCutoff && size != -1 && err == nil {
-		log.Printf("Size %d, serving directly", size)
+	if isDirect(req) {
+		log.Printf("Serving directly")
 		directProxy(rw, url)
 		return
 	}
