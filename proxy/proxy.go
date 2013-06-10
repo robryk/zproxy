@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 )
 
 const SizeCutoff = 10 // for testing
@@ -16,6 +17,13 @@ const SizeCutoff = 10 // for testing
 type Proxy struct {
 	Cr    hasher.ChunkedRetriever
 	Cache cache.Cache
+}
+
+type Request struct {
+	Method string
+	URL    *url.URL
+	Host   string //???
+	Header http.Header
 }
 
 func sanitizeRequest(req *http.Request) *http.Request {
@@ -48,6 +56,29 @@ func sanitizeRequest(req *http.Request) *http.Request {
 	// We set nil Trailer, because there is no way for us to set it early enough (or so I think)
 	// RemoteAddr, RequestURI and TLS make no sense on an outgoing request
 	return r
+}
+
+func MarshallRequest(req *http.Request) (*Request, error) {
+	if req.ContentLength != 0 {
+		return nil, fmt.Errorf("Cannot marshall a request with nonzero length body")
+	}
+	sanitizedReq := sanitizeRequest(req)
+	r := &Request{
+		Method: sanitizedReq.Method,
+		URL:    sanitizedReq.URL,
+		Header: sanitizedReq.Header,
+		Host:   sanitizedReq.Host,
+	}
+	return r, nil
+}
+
+func UnmarshallRequest(req *Request) *http.Request {
+	return &http.Request{
+		Method: req.Method,
+		URL:    req.URL,
+		Header: req.Header,
+		Host:   req.Host,
+	}
 }
 
 type byteRange struct {
