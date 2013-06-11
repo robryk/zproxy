@@ -57,10 +57,10 @@ type Proxy struct {
 
 func (p *Proxy) GetChunked(req *proxy.Request) (*Chunked, error) {
 	log.Printf("Getting chunked version of [%s]", req.URL)
-	//	v, err := p.group.Do(url, func() (interface{}, error) {
-	return hashRequest(req)
-	//	})
-	//	return v.(*Chunked), err
+	v, err := p.group.Do(fmt.Sprint(req), func() (interface{}, error) {
+		return hashRequest(req)
+	})
+	return v.(*Chunked), err
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"github.com/robryk/zproxy/proxy"
 	"github.com/robryk/zproxy/cache"
 	"github.com/robryk/zproxy/hasher"
+	"github.com/robryk/zproxy/split"
 	"io"
 	"io/ioutil"
 	"log"
@@ -125,22 +126,53 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// TODO: deal with status and headers
 	// TODO: emit content-length!
 
-	for _, chunk := range chunked.Chunks {
-		r, err := p.Cache.Read(string(chunk.Digest))
-		if err == nil {
-			io.Copy(rw, r)
-		} else {
-			// TODO: handle cache write failures
-			contents, _, _, err := getContents(string(url), byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
-			if err != nil {
-				log.Printf("Error retrieving missing chunk: %v", err)
-				return
+	log.Printf("Split into %d chunks", len(chunked.Chunks))
+
+	sema := make(chan struct{}, 2)
+	sema <- struct{}{}
+	sema <- struct{}{}
+	output := make(chan chan io.Reader, 5)
+
+	go func() {
+		defer close(output)
+		for i, chunk := range chunked.Chunks {
+			r, err := p.Cache.Read(string(chunk.Digest))
+			if err == nil {
+				log.Printf("Chunk %d[%v] from cache", i, chunk)
+				ch := make(chan io.Reader, 1)
+				ch <- r
+				output <- ch
+			} else {
+				log.Printf("Chunk %d[%v] from server", i, chunk)
+				<-sema
+				ch := make(chan io.Reader, 1)
+				output <- ch
+				go func(chunk split.Chunk, ch chan io.Reader) {
+					contents, _, _, err := getContents(string(url), byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
+					if err != nil {
+						log.Printf("Error retrieving missing chunk: %v", err)
+						return
+					}
+					go func(chunk split.Chunk, contents []byte) {
+						log.Printf("%v", chunk)
+						err := p.Cache.Write(string(chunk.Digest), bytes.NewReader(contents))
+						if err != nil {
+							log.Printf("Can't write chunk %v to cache: %v", chunk, err)
+						} else {
+							log.Printf("Chunk %v successfully cached", chunk)
+						}
+					}(chunk, contents)
+					ch <- bytes.NewReader(contents)
+					sema <- struct{}{}
+				}(chunk, ch)
 			}
-			// errors fixme
-			go p.Cache.Write(string(chunk.Digest), bytes.NewBuffer(contents))
-			rw.Write(contents)
 		}
+	}()
+
+	for ch := range output {
+		io.Copy(rw, <-ch)
 	}
+
 }
 
 func main() {

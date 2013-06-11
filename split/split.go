@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"camlistore.org/pkg/rollsum"
 	"crypto/sha256"
+	"encoding/hex"
 	"io"
 )
 
@@ -15,6 +16,10 @@ type Chunk struct {
 	Length   int
 	Digest   []byte
 	Contents []byte `json:"-"`
+}
+
+func (c Chunk) String() string {
+	return hex.EncodeToString(c.Digest)
 }
 
 const minBits = 18
