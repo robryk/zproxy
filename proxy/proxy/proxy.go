@@ -2,11 +2,11 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"flag"
-	"github.com/robryk/zproxy/proxy"
+	"fmt"
 	"github.com/robryk/zproxy/cache"
 	"github.com/robryk/zproxy/hasher"
+	"github.com/robryk/zproxy/proxy"
 	"github.com/robryk/zproxy/split"
 	"io"
 	"io/ioutil"
@@ -17,6 +17,7 @@ import (
 const SizeCutoff = 10
 
 var laddr = flag.String("addr", ":8000", "Address to listen on")
+var hasherUrl = flag.String("hasher", "http://127.0.0.1:9000", "Hasher's address")
 var cacheDir = flag.String("cache_dir", "", "Cache directory")
 
 type Proxy struct {
@@ -180,10 +181,15 @@ func main() {
 	var c cache.Cache
 	c = &cache.NoCache{}
 	if *cacheDir != "" {
-		c = &cache.DiskCache{Dir:*cacheDir}
+		c = &cache.DiskCache{Dir: *cacheDir}
+	}
+	var cr hasher.ChunkedRetriever
+	cr = &hasher.Proxy{}
+	if *hasherUrl != "" {
+		cr = &hasher.RemoteProxy{Url: *hasherUrl}
 	}
 	p := &Proxy{
-		Cr: &hasher.Proxy{},
+		Cr:    cr,
 		Cache: c,
 	}
 	log.Fatal(http.ListenAndServe(*laddr, p))
