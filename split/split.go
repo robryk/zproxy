@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"camlistore.org/pkg/rollsum"
-	"crypto/sha256"
 	"encoding/hex"
 	"io"
 )
@@ -25,14 +24,13 @@ func (c Chunk) String() string {
 const minBits = 18
 const minChunkSize = 1 << 15
 
-func Split(r io.Reader, out chan<- Chunk) error {
+func SplitFun(r io.Reader, outFn func([]byte) error) error {
 	br := bufio.NewReader(r)
 	rs := rollsum.New()
-	offset := 0
+	chunk := bytes.Buffer{}
 	for {
+		chunk.Reset()
 		var err error
-		chunk := bytes.Buffer{}
-		digest := sha256.New()
 		for !(rs.OnSplit() && rs.Bits() >= minBits) || chunk.Len() < minChunkSize {
 			var c byte
 			c, err = br.ReadByte()
@@ -43,22 +41,22 @@ func Split(r io.Reader, out chan<- Chunk) error {
 			if e := chunk.WriteByte(c); e != nil {
 				return e
 			}
-			if _, e := digest.Write([]byte{c}); e != nil {
-				return e
-			}
 		}
 		if err != nil && err != io.EOF {
 			return err
 		}
-		out <- Chunk{
-			Offset:   offset,
-			Length:   chunk.Len(),
-			Digest:   digest.Sum(nil),
-			Contents: chunk.Bytes(),
+		if err1 := outFn(chunk.Bytes()); err1 != nil {
+			return err1
 		}
-		offset += chunk.Len()
 		if err == io.EOF {
 			return nil
 		}
 	}
+}
+
+func Split(r io.Reader, out chan<- []byte) error {
+	return SplitFun(r, func(buf []byte) error {
+		out <- buf
+		return nil
+	})
 }

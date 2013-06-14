@@ -11,5 +11,5 @@ var laddr = flag.String("addr", ":9000", "Address to listen on")
 
 func main() {
 	flag.Parse()
-	log.Fatal(http.ListenAndServe(*laddr, &hasher.Proxy{}))
+	log.Fatal(http.ListenAndServe(*laddr, &hasher.Server{}))
 }

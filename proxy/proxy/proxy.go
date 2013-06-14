@@ -7,7 +7,6 @@ import (
 	"github.com/robryk/zproxy/cache"
 	"github.com/robryk/zproxy/hasher"
 	"github.com/robryk/zproxy/proxy"
-	"github.com/robryk/zproxy/split"
 	"io"
 	"io/ioutil"
 	"log"
@@ -21,8 +20,8 @@ var hasherUrl = flag.String("hasher", "http://127.0.0.1:9000", "Hasher's address
 var cacheDir = flag.String("cache_dir", "", "Cache directory")
 
 type Proxy struct {
-	Cr    hasher.ChunkedRetriever
-	Cache cache.Cache
+	Hasher hasher.Hasher
+	Cache  cache.Cache
 }
 
 type byteRange struct {
@@ -30,26 +29,16 @@ type byteRange struct {
 	end   int64
 }
 
-func getContents(url string, r byteRange) ([]byte, http.Header, int, error) {
+func getContents(url string, r byteRange) (*http.Response, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, err
 	}
 	if r.begin != 0 || r.end != 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end))
 	}
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	defer resp.Body.Close()
-
-	contents, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-
-	return contents, resp.Header, resp.StatusCode, nil
+	return resp, err
 }
 
 func copyHeaders(dst http.Header, src http.Header) {
@@ -118,14 +107,15 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	chunked, err := p.Cr.GetChunked(proxyReq)
-	if err != nil {
-		directProxy(rw, req)
-		return
-	}
+	chunked := p.Hasher.GetChunked(proxyReq)
+	//if err != nil {
+	//	directProxy(rw, req)
+	//	return
+	//}
 
 	// TODO: deal with status and headers
 	// TODO: emit content-length!
+	// TODO: check hasher's header against ours to verify if we can use it
 
 	log.Printf("Split into %d chunks", len(chunked.Chunks))
 
@@ -136,25 +126,31 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	go func() {
 		defer close(output)
-		for i, chunk := range chunked.Chunks {
+		for chunk := range chunked.Chunks {
 			r, err := p.Cache.Read(string(chunk.Digest))
 			if err == nil {
-				log.Printf("Chunk %d[%v] from cache", i, chunk)
+				log.Printf("Chunk [%v] from cache", chunk)
 				ch := make(chan io.Reader, 1)
 				ch <- r
 				output <- ch
 			} else {
-				log.Printf("Chunk %d[%v] from server", i, chunk)
+				log.Printf("Chunk [%v] from server", chunk)
 				<-sema
 				ch := make(chan io.Reader, 1)
 				output <- ch
-				go func(chunk split.Chunk, ch chan io.Reader) {
-					contents, _, _, err := getContents(string(url), byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
+				go func(chunk hasher.Chunk, ch chan io.Reader) {
+					resp, err := getContents(string(url), byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
 					if err != nil {
 						log.Printf("Error retrieving missing chunk: %v", err)
 						return
 					}
-					go func(chunk split.Chunk, contents []byte) {
+					contents, err := ioutil.ReadAll(resp.Body)
+					resp.Body.Close()
+					if err != nil {
+						log.Printf("Error retrieving missing chunk: %v", err)
+						return
+					}
+					go func(chunk hasher.Chunk, contents []byte) {
 						log.Printf("%v", chunk)
 						err := p.Cache.Write(string(chunk.Digest), bytes.NewReader(contents))
 						if err != nil {
@@ -168,6 +164,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				}(chunk, ch)
 			}
 		}
+		fmt.Printf("%v\n", chunked.Err)
 	}()
 
 	for ch := range output {
@@ -183,14 +180,14 @@ func main() {
 	if *cacheDir != "" {
 		c = &cache.DiskCache{Dir: *cacheDir}
 	}
-	var cr hasher.ChunkedRetriever
-	cr = &hasher.Proxy{}
+	var cr hasher.Hasher
+	cr = hasher.SimpleRetriever(0)
 	if *hasherUrl != "" {
-		cr = &hasher.RemoteProxy{Url: *hasherUrl}
+		cr = &hasher.Client{Url: *hasherUrl}
 	}
 	p := &Proxy{
-		Cr:    cr,
-		Cache: c,
+		Hasher: cr,
+		Cache:  c,
 	}
 	log.Fatal(http.ListenAndServe(*laddr, p))
 }
