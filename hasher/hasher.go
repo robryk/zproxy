@@ -99,8 +99,8 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request) *Chunked {
 }
 
 type Server struct {
-	Hasher    Hasher
-	group singleflight.Group
+	Hasher Hasher
+	group  singleflight.Group
 }
 
 type remoteResponse struct {
@@ -165,34 +165,38 @@ func (r Client) GetChunked(req *proxy.Request) *Chunked {
 		Cancel: make(chan bool),
 	}
 
-	serializedReq, err := json.Marshal(req)
-	if err != nil {
-		return nil
-	}
-
-	resp, err := http.Post(r.Url, "application/json", bytes.NewReader(serializedReq))
-	if err != nil {
-		return nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		chunked.Err = fmt.Errorf("HTTP request failed: %v", resp.Status)
-		close(chunked.Chunks)
-		resp.Body.Close()
-		return chunked
-	}
-
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&chunked.Header); err != nil {
-		chunked.Err = err
-		close(chunked.Chunks)
-		resp.Body.Close()
-		return chunked
-	}
+	returnCh := make(chan bool, 1)
 
 	go func() {
 		defer close(chunked.Chunks)
+		defer close(returnCh)
+
+		serializedReq, err := json.Marshal(req)
+		if err != nil {
+			chunked.Err = err
+			return
+		}
+
+		resp, err := http.Post(r.Url, "application/json", bytes.NewReader(serializedReq))
+		if err != nil {
+			chunked.Err = err
+			return
+		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			chunked.Err = fmt.Errorf("HTTP request failed: %v", resp.Status)
+			return
+		}
+
+		dec := json.NewDecoder(resp.Body)
+		if err := dec.Decode(&chunked.Header); err != nil {
+			chunked.Err = err
+			return
+		}
+
+		returnCh <- true
+
 		for {
 			var response remoteResponse
 			if err := dec.Decode(&response); err != nil {
@@ -218,6 +222,8 @@ func (r Client) GetChunked(req *proxy.Request) *Chunked {
 			}
 		}
 	}()
+
+	<-returnCh
 
 	return chunked
 }
