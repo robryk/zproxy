@@ -7,7 +7,20 @@ import (
 	"github.com/robryk/zproxy/proxy"
 	"log"
 	"net/http"
+	"sync"
 )
+
+type requestEntry struct {
+	wg     sync.WaitGroup
+	once   sync.Once
+	buffer *Buffer
+}
+
+type Server struct {
+	Hasher   Hasher
+	inflight map[string]*requestEntry
+	mu       sync.RWMutex
+}
 
 type remoteResponse struct {
 	Chunk *Chunk
@@ -19,6 +32,34 @@ func (p *Server) hasher() Hasher {
 		return p.Hasher
 	}
 	return defaultRetriever
+}
+
+func (p *Server) getBuffer(req proxy.Request) *requestEntry {
+	s := fmt.Sprint(req)
+	p.mu.RLock()
+	if r, ok := p.inflight[s]; ok {
+		p.mu.RUnlock()
+		r.wg.Add(1)
+		return r
+	}
+	p.mu.Lock()
+	if r, ok := p.inflight[s]; ok {
+		p.mu.Unlock()
+		r.wg.Add(1)
+		return r
+	}
+	r := &requestEntry{}
+	p.inflight[s] = r
+	p.mu.Unlock()
+
+	r.wg.Add(1)
+	go func() {
+		r.wg.Wait()
+		p.mu.Lock()
+		delete(p.inflight, s)
+		p.mu.Unlock()
+	}()
+	return r
 }
 
 func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -34,7 +75,14 @@ func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	chunked := p.hasher().GetChunked(&proxyRequest)
+	reqEntry := p.getBuffer(proxyRequest)
+	defer reqEntry.wg.Done()
+	reqEntry.once.Do(func() {
+		chunked := p.hasher().GetChunked(&proxyRequest)
+		reqEntry.buffer = NewBuffer(chunked)
+	})
+
+	chunked := reqEntry.buffer.NewReader()
 	defer close(chunked.Cancel)
 
 	rw.WriteHeader(http.StatusOK)
@@ -131,5 +179,6 @@ func (r Client) GetChunked(req *proxy.Request) *Chunked {
 
 	<-returnCh
 
-	return chunked
+	buffer := NewBuffer(chunked)
+	return buffer.NewReader()
 }

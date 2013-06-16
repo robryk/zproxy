@@ -1,7 +1,6 @@
 package hasher
 
 import (
-	"camlistore.org/pkg/singleflight"
 	"crypto/sha256"
 	"fmt"
 	"github.com/robryk/zproxy/proxy"
@@ -98,9 +97,4 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request) *Chunked {
 		})
 	}()
 	return chunked
-}
-
-type Server struct {
-	Hasher Hasher
-	group  singleflight.Group
 }
