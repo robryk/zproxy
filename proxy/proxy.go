@@ -23,14 +23,18 @@ func SanitizeRequest(req *http.Request) *http.Request {
 	r.URL = req.URL // FIXME: Should this be deeper?
 	// Proto* are ignored on outgoing requests
 	r.Header = make(http.Header)
+	// TODO: parse Connection header to remove additional hop-by-hop headers
 	for k, vv := range req.Header {
-		if k == "Connection" {
+		if k == "Connection" || k == "Keep-Alive" || k == "Proxy-Authorization" || k == "TE" || k == "Trailers" || k == "Transfer-Encoding" || k == "Upgrade" {
+			continue
+		}
+		// Temporary: we can't handle range requests
+		if k == "Range" {
 			continue
 		}
 		for _, v := range vv {
 			r.Header.Add(k, v)
 		}
-		// FIXME: Remove other headers
 	}
 	r.Body = req.Body // We might wish to warn about this
 	r.ContentLength = req.ContentLength
