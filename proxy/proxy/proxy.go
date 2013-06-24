@@ -29,15 +29,12 @@ type byteRange struct {
 	end   int64
 }
 
-func getContents(url string, r byteRange) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
+func getContents(req *proxy.Request, r byteRange) (*http.Response, error) {
+	httpReq := proxy.UnmarshalRequest(req)
 	if r.begin != 0 || r.end != 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end))
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(httpReq)
 	return resp, err
 }
 
@@ -63,12 +60,11 @@ func directProxy(rw http.ResponseWriter, req *http.Request) {
 	copyHeaders(rw.Header(), resp.Header)
 	rw.WriteHeader(resp.StatusCode)
 	io.Copy(rw, resp.Body)
-	// FIXME: Maybe deal with Trailer? We should send the Trailer if our request was http/1.1
 }
 
-func isDirect(req *http.Request) bool {
+func canHash(req *http.Request) (etag string, ok bool) {
 	if req.Method != "GET" {
-		return true
+		return "", false
 	}
 
 	headReq := proxy.SanitizeRequest(req)
@@ -78,17 +74,21 @@ func isDirect(req *http.Request) bool {
 	headResp, err := http.DefaultClient.Do(headReq)
 	if err != nil {
 		log.Printf("Head request to %s failed: %v", req.URL, err)
-		return true
+		return "", false
 	}
 	headResp.Body.Close()
 	if headResp.ContentLength < SizeCutoff || headResp.ContentLength == -1 {
 		// If the server can't return a Content-Length, chances are high the page changes often
 		// even if the server claims otherwise.
-		return true
+		return "", false
 	}
-	// FIXME: StatusMethodNotAvailable?
+	etag = headResp.Header.Get("ETag")
+	if etag == "" || etag[0] == 'W' {
+		// We require strong ETags to be sure that the hasher received the same entity.
+		return "", false
+	}
 	// FIXME: Cache-Control
-	return false
+	return etag, true
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -96,7 +96,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	url := req.URL.String()
 	log.Printf("Serving %s", url)
 
-	if isDirect(req) {
+	if _, ok := canHash(req); !ok {
 		log.Printf("Serving directly")
 		directProxy(rw, req)
 		return
@@ -107,7 +107,9 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	chunked := p.Hasher.GetChunked(proxyReq)
+	cancel := make(chan bool)
+	defer close(cancel)
+	chunked := p.Hasher.GetChunked(proxyReq, cancel)
 	//if err != nil {
 	//	directProxy(rw, req)
 	//	return
@@ -139,7 +141,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				ch := make(chan io.Reader, 1)
 				output <- ch
 				go func(chunk hasher.Chunk, ch chan io.Reader) {
-					resp, err := getContents(string(url), byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
+					resp, err := getContents(proxyReq, byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
 					if err != nil {
 						log.Printf("Error retrieving missing chunk: %v", err)
 						return
