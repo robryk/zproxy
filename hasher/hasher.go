@@ -13,14 +13,13 @@ import (
 // TODO: cache responses
 
 type Hasher interface {
-	GetChunked(req *proxy.Request) *Chunked
+	GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked
 }
 
 type Chunked struct {
-	Err    error
+	Err    *error
 	Header Header
-	Chunks chan Chunk
-	Cancel chan bool
+	Chunks <-chan Chunk
 }
 
 type Header struct {
@@ -45,16 +44,19 @@ var defaultRetriever SimpleRetriever
 
 var ErrCancel = fmt.Errorf("hasher: Hashing cancelled")
 
-func (sr SimpleRetriever) GetChunked(req *proxy.Request) *Chunked {
+func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked {
+	chunkCh := make(chan Chunk, 20)
+	
+	var finalErr error
 	chunked := &Chunked{
-		Chunks: make(chan Chunk, 20),
-		Cancel: make(chan bool),
+		Err: &finalErr,
+		Chunks: chunkCh,
 	}
 
 	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req))
 	if err != nil {
-		chunked.Err = err
-		close(chunked.Chunks)
+		finalErr = err
+		close(chunkCh)
 		return chunked
 	}
 
@@ -67,9 +69,9 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request) *Chunked {
 
 	go func() {
 		defer resp.Body.Close()
-		defer close(chunked.Chunks)
+		defer close(chunkCh)
 		offset := 0
-		chunked.Err = split.SplitFun(resp.Body, func(buf []byte) error {
+		finalErr = split.SplitFun(resp.Body, func(buf []byte) error {
 			digest := sha256.New()
 			if n, err := digest.Write(buf); err != nil || n < len(buf) {
 				if err == nil {
@@ -83,13 +85,13 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request) *Chunked {
 				Digest: digest.Sum(nil),
 			}
 			select {
-			case <-chunked.Cancel:
+			case <-cancel:
 				return ErrCancel
 			default:
 			}
 			select {
-			case chunked.Chunks <- chunk:
-			case <-chunked.Cancel:
+			case chunkCh <- chunk:
+			case <-cancel:
 				return ErrCancel
 			}
 			offset += len(buf)

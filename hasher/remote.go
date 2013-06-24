@@ -7,19 +7,10 @@ import (
 	"github.com/robryk/zproxy/proxy"
 	"log"
 	"net/http"
-	"sync"
 )
-
-type requestEntry struct {
-	wg     sync.WaitGroup
-	once   sync.Once
-	buffer *Buffer
-}
 
 type Server struct {
 	Hasher   Hasher
-	inflight map[string]*requestEntry
-	mu       sync.RWMutex
 }
 
 type remoteResponse struct {
@@ -32,34 +23,6 @@ func (p *Server) hasher() Hasher {
 		return p.Hasher
 	}
 	return defaultRetriever
-}
-
-func (p *Server) getBuffer(req proxy.Request) *requestEntry {
-	s := fmt.Sprint(req)
-	p.mu.RLock()
-	if r, ok := p.inflight[s]; ok {
-		p.mu.RUnlock()
-		r.wg.Add(1)
-		return r
-	}
-	p.mu.Lock()
-	if r, ok := p.inflight[s]; ok {
-		p.mu.Unlock()
-		r.wg.Add(1)
-		return r
-	}
-	r := &requestEntry{}
-	p.inflight[s] = r
-	p.mu.Unlock()
-
-	r.wg.Add(1)
-	go func() {
-		r.wg.Wait()
-		p.mu.Lock()
-		delete(p.inflight, s)
-		p.mu.Unlock()
-	}()
-	return r
 }
 
 func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -75,15 +38,9 @@ func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	reqEntry := p.getBuffer(proxyRequest)
-	defer reqEntry.wg.Done()
-	reqEntry.once.Do(func() {
-		chunked := p.hasher().GetChunked(&proxyRequest)
-		reqEntry.buffer = NewBuffer(chunked)
-	})
-
-	chunked := reqEntry.buffer.NewReader()
-	defer close(chunked.Cancel)
+	cancel := make(chan bool)
+	chunked := p.hasher().GetChunked(&proxyRequest, cancel)
+	defer close(cancel)
 
 	rw.WriteHeader(http.StatusOK)
 	enc := json.NewEncoder(rw)
@@ -92,15 +49,17 @@ func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		log.Printf("Error encoding header: %v", err)
 		return
 	}
+
 	for chunk := range chunked.Chunks {
 		if err := enc.Encode(remoteResponse{Chunk: &chunk}); err != nil {
 			log.Printf("Error encoding chunk: %v", err)
 			return
 		}
 	}
+
 	var trailer remoteResponse
-	if chunked.Err != nil {
-		errString := chunked.Err.Error()
+	if err := *chunked.Err; err != nil {
+		errString := err.Error()
 		trailer.Err = &errString
 	}
 	if err := enc.Encode(trailer); err != nil {
@@ -113,39 +72,40 @@ type Client struct {
 	Url string
 }
 
-func (r Client) GetChunked(req *proxy.Request) *Chunked {
+func (r Client) GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked {
+	var finalErr error
 	chunked := &Chunked{
-		Chunks: make(chan Chunk, 20),
-		Cancel: make(chan bool),
+		Err: &finalErr,
 	}
 
 	returnCh := make(chan bool, 1)
+	chunkCh := make(chan Chunk, 20)
 
 	go func() {
-		defer close(chunked.Chunks)
+		defer close(chunkCh)
 		defer close(returnCh)
 
 		serializedReq, err := json.Marshal(req)
 		if err != nil {
-			chunked.Err = err
+			finalErr = err
 			return
 		}
 
 		resp, err := http.Post(r.Url, "application/json", bytes.NewReader(serializedReq))
 		if err != nil {
-			chunked.Err = err
+			finalErr = err
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			chunked.Err = fmt.Errorf("HTTP request failed: %v", resp.Status)
+			finalErr = fmt.Errorf("HTTP request failed: %v", resp.Status)
 			return
 		}
 
 		dec := json.NewDecoder(resp.Body)
 		if err := dec.Decode(&chunked.Header); err != nil {
-			chunked.Err = err
+			finalErr = err
 			return
 		}
 
@@ -154,24 +114,24 @@ func (r Client) GetChunked(req *proxy.Request) *Chunked {
 		for {
 			var response remoteResponse
 			if err := dec.Decode(&response); err != nil {
-				chunked.Err = err
+				finalErr = err
 				return
 			}
 			if response.Chunk == nil {
 				// Last response
 				if response.Err != nil {
-					chunked.Err = fmt.Errorf("Remote error: %s", *response.Err)
+					finalErr = fmt.Errorf("Remote error: %s", *response.Err)
 				}
 				return
 			}
 			if response.Err != nil {
-				chunked.Err = fmt.Errorf("Unexpected response: %v", response)
+				finalErr = fmt.Errorf("Unexpected response: %v", response)
 				return
 			}
 			select {
-			case chunked.Chunks <- *response.Chunk:
-			case <-chunked.Cancel:
-				chunked.Err = ErrCancel
+			case chunkCh <- *response.Chunk:
+			case <-cancel:
+				finalErr = ErrCancel
 				return
 			}
 		}
@@ -179,6 +139,7 @@ func (r Client) GetChunked(req *proxy.Request) *Chunked {
 
 	<-returnCh
 
-	buffer := NewBuffer(chunked)
-	return buffer.NewReader()
+	buffer := NewBuffer(chunkCh)
+	chunked.Chunks = buffer.NewReader(cancel) // or maybe NewReader(nil)? we don't actually need it to cancel itself
+	return chunked
 }
