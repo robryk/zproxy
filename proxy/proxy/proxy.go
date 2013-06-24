@@ -38,15 +38,6 @@ func getContents(req *proxy.Request, r byteRange) (*http.Response, error) {
 	return resp, err
 }
 
-func copyHeaders(dst http.Header, src http.Header) {
-	for k := range dst {
-		delete(dst, k)
-	}
-	for k, v := range src {
-		dst[k] = v
-	}
-}
-
 func directProxy(rw http.ResponseWriter, req *http.Request) {
 	r := proxy.SanitizeRequest(req)
 	resp, err := http.DefaultClient.Do(r)
@@ -56,15 +47,21 @@ func directProxy(rw http.ResponseWriter, req *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// FIXME: Are there any headers we should omit?
-	copyHeaders(rw.Header(), resp.Header)
-	rw.WriteHeader(resp.StatusCode)
+	proxy.SanitizeResponseHeaders(rw, resp)
 	io.Copy(rw, resp.Body)
 }
 
-func canHash(req *http.Request) (etag string, ok bool) {
+func canHash(req *http.Request) (headResp *http.Response, etag string, hashingOk bool) {
 	if req.Method != "GET" {
-		return "", false
+		return
+	}
+	if vias, ok := req.Header["Via"]; ok {
+		for _, v := range vias {
+			if v == proxy.MyVia {
+				// TODO: We should error out here probably
+				return
+			}
+		}
 	}
 
 	headReq := proxy.SanitizeRequest(req)
@@ -74,21 +71,17 @@ func canHash(req *http.Request) (etag string, ok bool) {
 	headResp, err := http.DefaultClient.Do(headReq)
 	if err != nil {
 		log.Printf("Head request to %s failed: %v", req.URL, err)
-		return "", false
+		return
 	}
 	headResp.Body.Close()
-	if headResp.ContentLength < SizeCutoff || headResp.ContentLength == -1 {
-		// If the server can't return a Content-Length, chances are high the page changes often
-		// even if the server claims otherwise.
-		return "", false
-	}
 	etag = headResp.Header.Get("ETag")
+	// TODO: Maybe check that it is well-formed?
 	if etag == "" || etag[0] == 'W' {
 		// We require strong ETags to be sure that the hasher received the same entity.
-		return "", false
+		return
 	}
 	// FIXME: Cache-Control
-	return etag, true
+	return headResp, etag, true
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
@@ -96,7 +89,10 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	url := req.URL.String()
 	log.Printf("Serving %s", url)
 
-	if _, ok := canHash(req); !ok {
+	headResp, etag, canProxy := canHash(req)
+	_ = etag
+	if !canProxy || headResp.ContentLength < SizeCutoff || headResp.ContentLength == -1 {
+		// If we didn't get a Content-Length, just serve it directly.
 		log.Printf("Serving directly")
 		directProxy(rw, req)
 		return

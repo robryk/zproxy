@@ -8,6 +8,10 @@ import (
 
 const SizeCutoff = 10 // for testing
 
+// FIXME: This shouldn't be constant: we should identify ourselves *and* insert proper receiving protocol version here
+// And this shouldn't probably be in this package at all
+const MyVia = "1.1 hasher-proxy"
+
 type Request struct {
 	Method string
 	URL    *url.URL
@@ -25,7 +29,7 @@ func SanitizeRequest(req *http.Request) *http.Request {
 	r.Header = make(http.Header)
 	// TODO: parse Connection header to remove additional hop-by-hop headers
 	for k, vv := range req.Header {
-		if k == "Connection" || k == "Keep-Alive" || k == "Proxy-Authorization" || k == "TE" || k == "Trailers" || k == "Transfer-Encoding" || k == "Upgrade" {
+		if k == "Connection" || k == "Keep-Alive" || k == "Proxy-Authorization" || k == "TE" || k == "Trailer" || k == "Transfer-Encoding" || k == "Upgrade" {
 			continue
 		}
 		// Temporary: we can't handle range requests
@@ -36,6 +40,7 @@ func SanitizeRequest(req *http.Request) *http.Request {
 			r.Header.Add(k, v)
 		}
 	}
+	r.Header.Add("Via", MyVia)
 	r.Body = req.Body // We might wish to warn about this
 	r.ContentLength = req.ContentLength
 	if r.ContentLength == -1 {
@@ -49,6 +54,22 @@ func SanitizeRequest(req *http.Request) *http.Request {
 	// We set nil Trailer, because there is no way for us to set it early enough (or so I think)
 	// RemoteAddr, RequestURI and TLS make no sense on an outgoing request
 	return r
+}
+
+func SanitizeResponseHeaders(rw http.ResponseWriter, resp *http.Response) {
+	// TODO: parse Connection header to remove additional hop-by-hop headers
+	for k, vv := range resp.Header {
+		// TODO: Some of these should cause an abort
+		if k == "Connection" || k == "Keep-Alive" || k == "Proxy-Authenticate" || k == "Trailer" || k == "Transfer-Encoding" || k == "Upgrade" {
+			continue
+		}
+		for _, v := range vv {
+			rw.Header().Add(k, v)
+		}
+	}
+	rw.Header().Add("Via", MyVia)
+	// TODO: Should we rewrite some status codes?
+	rw.WriteHeader(resp.StatusCode)
 }
 
 func MarshalRequest(req *http.Request) (*Request, error) {
