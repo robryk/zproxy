@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/robryk/zproxy/proxy"
 	"log"
 	"net/http"
 )
@@ -31,15 +30,15 @@ func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var proxyRequest proxy.Request
+	var request Request
 	dec := json.NewDecoder(req.Body)
-	if err := dec.Decode(&proxyRequest); err != nil {
+	if err := dec.Decode(&request); err != nil {
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	cancel := make(chan bool)
-	chunked, err := p.hasher().GetChunked(&proxyRequest, cancel)
+	chunked, err := p.hasher().GetChunked(&request, cancel)
 	defer close(cancel)
 
 	if err != nil {
@@ -77,7 +76,7 @@ type Client struct {
 	Url string
 }
 
-func (r Client) GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error) {
+func (r Client) GetChunked(req *Request, cancel <-chan bool) (*Chunked, error) {
 	var finalErr error
 	chunked := &Chunked{
 		Err: &finalErr,

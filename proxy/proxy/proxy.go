@@ -90,7 +90,6 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	log.Printf("Serving %s", url)
 
 	headResp, etag, canProxy := canHash(req)
-	_ = etag
 	if !canProxy || headResp.ContentLength < SizeCutoff || headResp.ContentLength == -1 {
 		// If we didn't get a Content-Length, just serve it directly.
 		log.Printf("Serving directly")
@@ -106,7 +105,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	cancel := make(chan bool)
 	defer close(cancel)
-	chunked, err := p.Hasher.GetChunked(proxyReq, cancel)
+	chunked, err := p.Hasher.GetChunked(&hasher.Request{proxyReq, etag}, cancel)
 	if err != nil {
 		log.Printf("Error from hasher: %s. Serving directly", err.Error())
 		directProxy(rw, req)

@@ -13,7 +13,12 @@ import (
 // TODO: cache responses
 
 type Hasher interface {
-	GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error)
+	GetChunked(req *Request, cancel <-chan bool) (*Chunked, error)
+}
+
+type Request struct {
+	HttpRequest *proxy.Request
+	Etag        string
 }
 
 type Chunked struct {
@@ -44,7 +49,7 @@ var defaultRetriever SimpleRetriever
 
 var ErrCancel = fmt.Errorf("hasher: Hashing cancelled")
 
-func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error) {
+func (sr SimpleRetriever) GetChunked(req *Request, cancel <-chan bool) (*Chunked, error) {
 	chunkCh := make(chan Chunk, 20)
 
 	var finalErr error
@@ -53,9 +58,13 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) (*C
 		Chunks: chunkCh,
 	}
 
-	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req))
+	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req.HttpRequest))
 	if err != nil {
 		return nil, err
+	}
+	if resp.Header.Get("ETag") != req.Etag {
+		resp.Body.Close()
+		return nil, fmt.Errorf("ETag doesn't match expected value")
 	}
 
 	chunked.Header = Header{
