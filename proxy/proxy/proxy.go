@@ -99,17 +99,19 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 	proxyReq, err := proxy.MarshalRequest(req)
 	if err != nil {
+		log.Printf("Error marshalling request: %s. Serving directly", err.Error())
 		directProxy(rw, req)
 		return
 	}
 
 	cancel := make(chan bool)
 	defer close(cancel)
-	chunked := p.Hasher.GetChunked(proxyReq, cancel)
-	//if err != nil {
-	//	directProxy(rw, req)
-	//	return
-	//}
+	chunked, err := p.Hasher.GetChunked(proxyReq, cancel)
+	if err != nil {
+		log.Printf("Error from hasher: %s. Serving directly", err.Error())
+		directProxy(rw, req)
+		return
+	}
 
 	// TODO: deal with status and headers
 	// TODO: emit content-length!

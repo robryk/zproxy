@@ -10,7 +10,7 @@ import (
 )
 
 type Server struct {
-	Hasher   Hasher
+	Hasher Hasher
 }
 
 type remoteResponse struct {
@@ -39,8 +39,13 @@ func (p *Server) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	cancel := make(chan bool)
-	chunked := p.hasher().GetChunked(&proxyRequest, cancel)
+	chunked, err := p.hasher().GetChunked(&proxyRequest, cancel)
 	defer close(cancel)
+
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	rw.WriteHeader(http.StatusOK)
 	enc := json.NewEncoder(rw)
@@ -72,44 +77,44 @@ type Client struct {
 	Url string
 }
 
-func (r Client) GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked {
+func (r Client) GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error) {
 	var finalErr error
 	chunked := &Chunked{
 		Err: &finalErr,
 	}
 
-	returnCh := make(chan bool, 1)
+	returnCh := make(chan error, 1)
 	chunkCh := make(chan Chunk, 20)
 
 	go func() {
 		defer close(chunkCh)
-		defer close(returnCh)
 
 		serializedReq, err := json.Marshal(req)
 		if err != nil {
-			finalErr = err
+			returnCh <- err
 			return
 		}
 
 		resp, err := http.Post(r.Url, "application/json", bytes.NewReader(serializedReq))
 		if err != nil {
-			finalErr = err
+			returnCh <- err
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			finalErr = fmt.Errorf("HTTP request failed: %v", resp.Status)
+			// TODO: Read the error from the body
+			returnCh <- fmt.Errorf("HTTP request failed: %v", resp.Status)
 			return
 		}
 
 		dec := json.NewDecoder(resp.Body)
 		if err := dec.Decode(&chunked.Header); err != nil {
-			finalErr = err
+			returnCh <- err
 			return
 		}
 
-		returnCh <- true
+		returnCh <- nil
 
 		for {
 			var response remoteResponse
@@ -137,9 +142,11 @@ func (r Client) GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked {
 		}
 	}()
 
-	<-returnCh
+	if err := <-returnCh; err != nil {
+		return nil, err
+	}
 
 	buffer := NewBuffer(chunkCh)
 	chunked.Chunks = buffer.NewReader(cancel) // or maybe NewReader(nil)? we don't actually need it to cancel itself
-	return chunked
+	return chunked, nil
 }

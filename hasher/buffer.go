@@ -5,10 +5,10 @@ import (
 )
 
 type Buffer struct {
-	buf       []Chunk
-	eof       chan struct{}
-	mu        sync.RWMutex
-	cond      sync.Cond
+	buf  []Chunk
+	eof  chan struct{}
+	mu   sync.RWMutex
+	cond sync.Cond
 }
 
 func NewBuffer(chunked <-chan Chunk) *Buffer {

@@ -13,7 +13,7 @@ import (
 // TODO: cache responses
 
 type Hasher interface {
-	GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked
+	GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error)
 }
 
 type Chunked struct {
@@ -44,20 +44,18 @@ var defaultRetriever SimpleRetriever
 
 var ErrCancel = fmt.Errorf("hasher: Hashing cancelled")
 
-func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) *Chunked {
+func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) (*Chunked, error) {
 	chunkCh := make(chan Chunk, 20)
-	
+
 	var finalErr error
 	chunked := &Chunked{
-		Err: &finalErr,
+		Err:    &finalErr,
 		Chunks: chunkCh,
 	}
 
 	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req))
 	if err != nil {
-		finalErr = err
-		close(chunkCh)
-		return chunked
+		return nil, err
 	}
 
 	chunked.Header = Header{
@@ -98,5 +96,5 @@ func (sr SimpleRetriever) GetChunked(req *proxy.Request, cancel <-chan bool) *Ch
 			return nil
 		})
 	}()
-	return chunked
+	return chunked, nil
 }
