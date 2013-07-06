@@ -46,10 +46,10 @@ func (b *Buffer) Get(idx int) (chunk Chunk, eof bool) {
 		b.cond.Wait()
 	}
 
-	if b.isEof() {
-		return Chunk{}, true
-	} else {
+	if idx < len(b.buf) {
 		return b.buf[idx], false
+	} else {
+		return Chunk{}, true
 	}
 }
 
