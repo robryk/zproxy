@@ -32,15 +32,20 @@ type byteRange struct {
 func getContents(req *proxy.Request, r byteRange) (*http.Response, error) {
 	httpReq := proxy.UnmarshalRequest(req)
 	if r.begin != 0 || r.end != 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end))
+		httpReq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end))
 	}
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := http.DefaultTransport.RoundTrip(httpReq)
+	if resp.Header.Get("Content-Range") == "" {
+		// TODO: Do something more intelligent (check earlier if supported and check Content-Range's value)
+		resp.Body.Close()
+		return nil, fmt.Errorf("No Content-Range in response")
+	}
 	return resp, err
 }
 
 func directProxy(rw http.ResponseWriter, req *http.Request) {
 	r := proxy.SanitizeRequest(req)
-	resp, err := http.DefaultClient.Do(r)
+	resp, err := http.DefaultTransport.RoundTrip(r)
 	if err != nil {
 		http.Error(rw, fmt.Sprintf("Proxy error: %v", err), http.StatusInternalServerError)
 		return
@@ -68,7 +73,7 @@ func canHash(req *http.Request) (headResp *http.Response, etag string, hashingOk
 	headReq.Method = "HEAD"
 	headReq.Body = nil
 	headReq.ContentLength = 0
-	headResp, err := http.DefaultClient.Do(headReq)
+	headResp, err := http.DefaultTransport.RoundTrip(headReq)
 	if err != nil {
 		log.Printf("Head request to %s failed: %v", req.URL, err)
 		return
@@ -116,8 +121,6 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	// TODO: emit content-length!
 	// TODO: check hasher's header against ours to verify if we can use it
 
-	log.Printf("Split into %d chunks", len(chunked.Chunks))
-
 	sema := make(chan struct{}, 2)
 	sema <- struct{}{}
 	sema <- struct{}{}
@@ -144,6 +147,10 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 						return
 					}
 					contents, err := ioutil.ReadAll(resp.Body)
+					if len(contents) != chunk.Length {
+						log.Printf("Overly long chunk")
+						return
+					}
 					resp.Body.Close()
 					if err != nil {
 						log.Printf("Error retrieving missing chunk: %v", err)
@@ -163,7 +170,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				}(chunk, ch)
 			}
 		}
-		fmt.Printf("%v\n", chunked.Err)
+		fmt.Printf("%v\n", *chunked.Err)
 	}()
 
 	for ch := range output {

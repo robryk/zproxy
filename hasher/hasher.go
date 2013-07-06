@@ -58,7 +58,7 @@ func (sr SimpleRetriever) GetChunked(req *Request, cancel <-chan bool) (*Chunked
 		Chunks: chunkCh,
 	}
 
-	resp, err := http.DefaultClient.Do(proxy.UnmarshalRequest(req.HttpRequest))
+	resp, err := http.DefaultTransport.RoundTrip(proxy.UnmarshalRequest(req.HttpRequest))
 	if err != nil {
 		return nil, err
 	}
