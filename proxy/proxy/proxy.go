@@ -29,18 +29,23 @@ type byteRange struct {
 	end   int64
 }
 
-func getContents(req *proxy.Request, r byteRange) (*http.Response, error) {
+func getContents(req *proxy.Request, r byteRange) ([]byte, error) {
 	httpReq := proxy.UnmarshalRequest(req)
-	if r.begin != 0 || r.end != 0 {
-		httpReq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end))
-	}
+	httpReq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.begin, r.end-1))
 	resp, err := http.DefaultTransport.RoundTrip(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 	if resp.Header.Get("Content-Range") == "" {
 		// TODO: Do something more intelligent (check earlier if supported and check Content-Range's value)
-		resp.Body.Close()
 		return nil, fmt.Errorf("No Content-Range in response")
 	}
-	return resp, err
+	contents, err := ioutil.ReadAll(resp.Body)
+	if len(contents) != int(r.end - r.begin) {
+		return nil, fmt.Errorf("Wrong length of range response %d %d %d", len(contents), r.end, r.begin)
+	}
+	return contents, err
 }
 
 func directProxy(rw http.ResponseWriter, req *http.Request) {
@@ -141,19 +146,11 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 				ch := make(chan io.Reader, 1)
 				output <- ch
 				go func(chunk hasher.Chunk, ch chan io.Reader) {
-					resp, err := getContents(proxyReq, byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
+					contents, err := getContents(proxyReq, byteRange{int64(chunk.Offset), int64(chunk.Offset + chunk.Length)})
 					if err != nil {
 						log.Printf("Error retrieving missing chunk: %v", err)
-						return
-					}
-					contents, err := ioutil.ReadAll(resp.Body)
-					if len(contents) != chunk.Length {
-						log.Printf("Overly long chunk")
-						return
-					}
-					resp.Body.Close()
-					if err != nil {
-						log.Printf("Error retrieving missing chunk: %v", err)
+						ch <- bytes.NewReader(nil)
+						sema <- struct{}{}
 						return
 					}
 					go func(chunk hasher.Chunk, contents []byte) {
