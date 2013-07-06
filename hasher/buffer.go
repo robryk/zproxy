@@ -13,7 +13,7 @@ type Buffer struct {
 
 func NewBuffer(chunked <-chan Chunk) *Buffer {
 	b := &Buffer{eof: make(chan struct{})}
-	b.cond.L = &b.mu
+	b.cond.L = b.mu.RLocker()
 	go func() {
 		for chunk := range chunked {
 			b.mu.Lock()
