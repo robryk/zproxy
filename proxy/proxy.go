@@ -86,11 +86,19 @@ func MarshalRequest(req *http.Request) (*Request, error) {
 	return r, nil
 }
 
+func copyHeaders(orig http.Header) http.Header {
+	cp := http.Header{}
+	for k, vv := range orig {
+		cp[k] = append([]string(nil), vv...)
+	}
+	return cp
+}
+
 func UnmarshalRequest(req *Request) *http.Request {
 	return &http.Request{
 		Method: req.Method,
 		URL:    req.URL,
-		Header: req.Header,
+		Header: copyHeaders(req.Header),
 		Host:   req.Host,
 	}
 }
